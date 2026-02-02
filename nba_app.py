@@ -2,12 +2,13 @@ import streamlit as st
 import requests
 import pandas as pd
 import sqlite3
+import altair as alt
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-# Intentar importar librería de Standings para L10 Automático
+# Intentar importar librerías de la NBA
 try:
-    from nba_api.stats.endpoints import leaguestandings
+    from nba_api.stats.endpoints import leaguestandings, leaguedashteamstats
     NBA_API_AVAILABLE = True
 except:
     NBA_API_AVAILABLE = False
@@ -15,8 +16,8 @@ except:
 # --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="NBA AI PRO V8.9", layout="wide", page_icon="🏀")
 
-# --- 2. BASE DE DATOS DE ESTADÍSTICAS ---
-ADVANCED_STATS = {
+# --- 2. BASE DE DATOS DE RESPALDO (Por si falla la API) ---
+ADVANCED_STATS_FALLBACK = {
     "Celtics": [123.5, 110.5, 1.12, 4.8, 0.99], "Thunder": [119.5, 110.0, 1.09, 3.8, 1.02],
     "Nuggets": [118.0, 112.0, 1.18, 5.8, 0.97], "76ers": [116.5, 113.5, 1.02, 3.5, 0.98],
     "Cavaliers": [117.2, 110.2, 1.06, 3.8, 0.98], "Lakers": [116.0, 115.0, 1.07, 4.2, 1.03],
@@ -34,8 +35,6 @@ ADVANCED_STATS = {
     "Wizards": [111.8, 122.5, 0.91, 3.0, 1.04], "Trail Blazers": [110.0, 117.5, 0.93, 3.8, 0.98]
 }
 
-# --- NUEVO: ADN COMPLETO DE LOS 30 EQUIPOS (Distribución Q1, Q2, Q3, Q4) ---
-# Suma aprox 1.0. Esto evita que los cuartos se vean iguales.
 TEAM_QUARTER_DNA = {
     "Celtics": [0.27, 0.26, 0.24, 0.23], "Thunder": [0.26, 0.26, 0.25, 0.23],
     "Nuggets": [0.25, 0.25, 0.26, 0.24], "76ers": [0.26, 0.25, 0.24, 0.25],
@@ -63,17 +62,37 @@ STARS_DB = {
 }
 
 # --- 3. FUNCIONES DE DATOS ---
+
+@st.cache_data(ttl=21600)
+def get_live_advanced_stats():
+    """Descarga stats reales de la NBA API"""
+    if not NBA_API_AVAILABLE: return ADVANCED_STATS_FALLBACK
+    try:
+        stats = leaguedashteamstats.LeagueDashTeamStats(season='2024-25').get_data_frames()[0]
+        live_map = {}
+        for _, row in stats.iterrows():
+            name = row['TEAM_NAME'].split()[-1]
+            if "76ers" in row['TEAM_NAME']: name = "76ers"
+            if "Blazers" in row['TEAM_NAME']: name = "Trail Blazers"
+            
+            # Formato: [Puntos Off, Puntos Def, Pace Factor, Rebote Factor, Ritmo]
+            live_map[name] = [
+                round(row['PTS']/row['GP'], 1),
+                round((row['PTS'] - row['PLUS_MINUS'])/row['GP'], 1),
+                1.05, 4.0, 1.0  # Valores base ajustables
+            ]
+        return live_map
+    except: return ADVANCED_STATS_FALLBACK
+
 @st.cache_data(ttl=3600)
 def get_l10_stats():
-    """Obtiene el récord L10 de la API oficial"""
     try:
         standings = leaguestandings.LeagueStandings(season='2024-25').get_dict()
         data = standings['resultSets'][0]['rowSet']
         l10_map = {}
         headers = standings['resultSets'][0]['headers']
         idx_name, idx_l10 = headers.index('TeamName'), headers.index('L10')
-        for row in data:
-            l10_map[row[idx_name]] = row[idx_l10]
+        for row in data: l10_map[row[idx_name]] = row[idx_l10]
         return l10_map
     except: return {}
 
@@ -112,20 +131,14 @@ def perform_auto_detection(team_nick, injuries_db):
                 detected_stars.append(f"{player} (USG%: {stats[2]})")
     return min(0.26, penalizacion), detected_stars
 
-def get_history():
-    try:
-        conn = sqlite3.connect('nba_data.db')
-        df = pd.read_sql_query("SELECT fecha, partido, pred_total FROM historial ORDER BY id DESC LIMIT 5", conn)
-        conn.close(); return df
-    except: return pd.DataFrame(columns=["Fecha", "Partido", "Pred"])
-
 # --- 4. SIDEBAR ---
+ADVANCED_STATS = get_live_advanced_stats()
 inj_db = get_espn_injuries()
 l10_data = get_l10_stats()
 
 with st.sidebar:
     st.header("⚙️ SISTEMA V8.9 PRO")
-    if st.button("🔄 ACTUALIZAR TODO"):
+    if st.button("🔄 ACTUALIZAR DATOS"):
         st.cache_data.clear(); st.rerun()
     
     st.subheader("🦓 FACTOR ARBITRAL")
@@ -139,53 +152,39 @@ with st.sidebar:
     st.subheader("🔋 FACTOR B2B")
     b2b_l = st.toggle("Local en B2B", key="b2bl")
     b2b_v = st.toggle("Visita en B2B (+Castigo)", key="b2bv")
-    
-    st.subheader("📍 LISTA LESIONADOS")
-    for t_nick_disp in sorted(ADVANCED_STATS.keys()):
-        bajas_sidebar = inj_db.get(t_nick_disp.lower(), [])
-        if bajas_sidebar:
-            with st.expander(f"📍 {t_nick_disp.upper()}"):
-                for p in bajas_sidebar: st.write(f"• {p}")
 
 # --- 5. INTERFAZ PRINCIPAL ---
 st.title("🏀 NBA AI PRO V8.9: FULL QUARTER DNA")
-
-with st.expander("🔍 VER REPORTE DE LESIONADOS EN TIEMPO REAL (ESPN)"):
-    cols = st.columns(3)
-    for i, (team, players) in enumerate(inj_db.items()):
-        cols[i % 3].markdown(f"**{team.upper()}**")
-        for p in players: cols[i % 3].caption(f"❌ {p}")
 
 c1, c2 = st.columns(2)
 
 with c1:
     l_nick = st.selectbox("LOCAL", sorted(ADVANCED_STATS.keys()), index=5)
+    st.image(f"https://a.espncdn.com/i/teamlogos/nba/500/{l_nick.lower()}.png", width=80)
     rec_l = l10_data.get(l_nick, l10_data.get(l_nick.split()[-1], None))
     bonus_l10_l, status_l = calculate_inertia(rec_l)
-    st.markdown(f"### {l_nick} | {status_l} ({rec_l if rec_l else 'N/A'})")
+    st.markdown(f"### {status_l} ({rec_l if rec_l else 'N/A'})")
     
     penal_auto_l, estrellas_l = perform_auto_detection(l_nick, inj_db)
-    if estrellas_l: st.error(f"⚠️ BAJAS CLAVE: {', '.join(estrellas_l)}")
-    else: st.success("✅ Plantilla OK")
+    if estrellas_l: st.error(f"⚠️ BAJAS: {', '.join(estrellas_l)}")
     venganza_l = st.checkbox("🔥 Venganza", key="vl")
 
 with c2:
     v_nick = st.selectbox("VISITANTE", sorted(ADVANCED_STATS.keys()), index=23)
+    st.image(f"https://a.espncdn.com/i/teamlogos/nba/500/{v_nick.lower()}.png", width=80)
     rec_v = l10_data.get(v_nick, l10_data.get(v_nick.split()[-1], None))
     bonus_l10_v, status_v = calculate_inertia(rec_v)
-    st.markdown(f"### {v_nick} | {status_v} ({rec_v if rec_v else 'N/A'})")
+    st.markdown(f"### {status_v} ({rec_v if rec_v else 'N/A'})")
 
     penal_auto_v, estrellas_v = perform_auto_detection(v_nick, inj_db)
-    if estrellas_v: st.error(f"⚠️ BAJAS CLAVE: {', '.join(estrellas_v)}")
-    else: st.success("✅ Plantilla OK")
+    if estrellas_v: st.error(f"⚠️ BAJAS: {', '.join(estrellas_v)}")
     venganza_v = st.checkbox("🔥 Venganza", key="vv")
 
 # --- 6. MOTOR DE CÁLCULO ---
-if st.button("🚀 CALCULAR PICK (ADN + PALIZA)"):
+if st.button("🚀 CALCULAR PICK (IA ACTUALIZADA)"):
     s_l, s_v = ADVANCED_STATS[l_nick], ADVANCED_STATS[v_nick]
     alt_bonus = 1.02 if l_nick in ["Nuggets", "Jazz"] else 1.0
-    if abs(s_l[4] - s_v[4]) > 0.07: st.warning("⚠️ ALERTA: Choque de Ritmos")
-
+    
     penal_b2b_l = 0.035 if b2b_l else 0
     penal_b2b_v = 0.042 if b2b_v else 0 
     
@@ -197,53 +196,60 @@ if st.button("🚀 CALCULAR PICK (ADN + PALIZA)"):
     
     res_l, res_v = round(pot_l + s_l[3], 1), round(pot_v, 1)
     
-    # --- DISTRIBUCIÓN POR ADN REAL ---
-    # Ahora usamos el diccionario completo, por lo que nunca usará el fallback de 0.25
     dna_l = TEAM_QUARTER_DNA.get(l_nick, [0.25, 0.25, 0.25, 0.25])
     dna_v = TEAM_QUARTER_DNA.get(v_nick, [0.25, 0.25, 0.25, 0.25])
     
     q1_l, q2_l, q3_l = [res_l * p for p in dna_l[:3]]
     q1_v, q2_v, q3_v = [res_v * p for p in dna_v[:3]]
     
-    cum_l_q3 = q1_l + q2_l + q3_l
-    cum_v_q3 = q1_v + q2_v + q3_v
-    diff_q3 = cum_l_q3 - cum_v_q3
+    diff_q3 = (q1_l + q2_l + q3_l) - (q1_v + q2_v + q3_v)
     
-    # Factor Paliza (Blowout)
-    q4_l = res_l * dna_l[3]
-    q4_v = res_v * dna_v[3]
+    q4_l, q4_v = res_l * dna_l[3], res_v * dna_v[3]
     
     blowout_msg = ""
     if abs(diff_q3) > 15:
-        blowout_msg = "🚨 DETECCIÓN DE PALIZA (GARBAGE TIME): Puntos reducidos en Q4"
-        if diff_q3 > 0: # Local gana
-            q4_l *= 0.85
-            q4_v *= 0.95
-        else: # Visita gana
-            q4_v *= 0.85
-            q4_l *= 0.95
+        blowout_msg = "🚨 DETECCIÓN DE PALIZA (GARBAGE TIME): Q4 Ajustado"
+        if diff_q3 > 0: q4_l *= 0.85; q4_v *= 0.95
+        else: q4_v *= 0.85; q4_l *= 0.95
             
-    final_l = q1_l + q2_l + q3_l + q4_l
-    final_v = q1_v + q2_v + q3_v + q4_v
+    final_l, final_v = sum([q1_l, q2_l, q3_l, q4_l]), sum([q1_v, q2_v, q3_v, q4_v])
     total_ia = round(final_l + final_v, 1)
     diff_final = final_l - final_v
     wp_l = 1 / (1 + (10 ** (-diff_final / 15)))
 
-    # --- RESULTADOS ---
     st.divider()
     if blowout_msg: st.info(blowout_msg)
     
     rc1, rc2 = st.columns([2, 1])
     with rc1:
         st.header(f"📊 {l_nick} {round(final_l,1)} - {round(final_v,1)} {v_nick}")
-        st.progress(wp_l, text=f"Probabilidad {l_nick}: {round(wp_l*100, 1)}%")
+        st.progress(wp_l, text=f"Probabilidad Local: {round(wp_l*100, 1)}%")
         
     with rc2:
         st.metric("TOTAL IA", total_ia, delta=f"{round(total_ia - linea_ou, 1)} vs Casino")
         st.metric("SPREAD IA", round(-diff_final, 1), delta=f"{round((-diff_final) - linea_spread, 1)} Valor")
 
+    # Tabla de cuartos
     st.table(pd.DataFrame({
-        "Periodo": ["Q1", "Q2", "Q3", "Q4", "FINAL"],
+        "Periodo": ["Q1", "Q2", "Q3", "Q4", "TOTAL"],
         l_nick: [round(x,1) for x in [q1_l, q2_l, q3_l, q4_l, final_l]],
         v_nick: [round(x,1) for x in [q1_v, q2_v, q3_v, q4_v, final_v]]
     }))
+
+    # Gráfico de evolución acumulada
+    evolucion = pd.DataFrame({
+        'Cuarto': ['Q1', 'Q2', 'Q3', 'Q4'],
+        l_nick: [q1_l, q1_l+q2_l, q1_l+q2_l+q3_l, final_l],
+        v_nick: [q1_v, q1_v+q2_v, q1_v+q2_v+q3_v, final_v]
+    }).melt('Cuarto', var_name='Equipo', value_name='Puntos')
+    
+    chart = alt.Chart(evolucion).mark_line(point=True).encode(
+        x=alt.X('Cuarto', sort=None), y='Puntos', color='Equipo'
+    ).properties(height=300)
+    st.altair_chart(chart, use_container_width=True)
+
+with st.expander("🔍 VER REPORTE DE LESIONES ESPN"):
+    cols = st.columns(3)
+    for i, (team, players) in enumerate(inj_db.items()):
+        cols[i % 3].markdown(f"**{team.upper()}**")
+        for p in players: cols[i % 3].caption(f"❌ {p}")
