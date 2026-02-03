@@ -14,7 +14,7 @@ except:
     NBA_API_AVAILABLE = False
 
 # --- 1. CONFIGURACIÓN Y BASE DE DATOS ---
-st.set_page_config(page_title="NBA AI PRO V10.1", layout="wide", page_icon="🏀")
+st.set_page_config(page_title="NBA AI PREDICTOR V10.2", layout="wide", page_icon="🏀")
 
 def init_db():
     conn = sqlite3.connect('nba_historial.db')
@@ -30,7 +30,6 @@ def init_db():
 init_db()
 
 # --- 2. BASES DE DATOS MAESTRAS (30 EQUIPOS) ---
-
 TEAM_SKILLS = {
     "Celtics": [10, 8, 8, 8], "Thunder": [9, 8, 7, 10], "Nuggets": [8, 10, 9, 7],
     "Cavaliers": [8, 9, 8, 7], "Timberwolves": [7, 9, 10, 7], "Knicks": [8, 8, 9, 6],
@@ -62,24 +61,6 @@ ADVANCED_STATS_FALLBACK = {
     "Wizards": [111.8, 122.5, 0.91, 3.0, 1.04], "Trail Blazers": [110.0, 117.5, 0.93, 3.8, 0.98]
 }
 
-TEAM_QUARTER_DNA = {
-    "Celtics": [0.27, 0.26, 0.24, 0.23], "Thunder": [0.26, 0.26, 0.25, 0.23],
-    "Nuggets": [0.25, 0.25, 0.26, 0.24], "76ers": [0.26, 0.25, 0.24, 0.25],
-    "Cavaliers": [0.26, 0.26, 0.24, 0.24], "Lakers": [0.24, 0.25, 0.24, 0.27],
-    "Warriors": [0.23, 0.24, 0.30, 0.23], "Knicks": [0.25, 0.25, 0.26, 0.24],
-    "Mavericks": [0.24, 0.24, 0.25, 0.27], "Bucks": [0.24, 0.25, 0.23, 0.28],
-    "Timberwolves": [0.25, 0.26, 0.24, 0.25], "Suns": [0.25, 0.25, 0.25, 0.25],
-    "Pacers": [0.28, 0.27, 0.24, 0.21], "Kings": [0.27, 0.26, 0.24, 0.23],
-    "Heat": [0.23, 0.24, 0.25, 0.28], "Magic": [0.24, 0.25, 0.26, 0.25],
-    "Clippers": [0.25, 0.25, 0.25, 0.25], "Rockets": [0.24, 0.24, 0.26, 0.26],
-    "Pelicans": [0.25, 0.26, 0.24, 0.25], "Hawks": [0.27, 0.26, 0.24, 0.23],
-    "Grizzlies": [0.24, 0.24, 0.25, 0.27], "Bulls": [0.25, 0.24, 0.24, 0.27],
-    "Nets": [0.24, 0.24, 0.24, 0.28], "Raptors": [0.25, 0.25, 0.25, 0.25],
-    "Jazz": [0.23, 0.24, 0.26, 0.27], "Spurs": [0.24, 0.24, 0.25, 0.27],
-    "Hornets": [0.26, 0.24, 0.24, 0.26], "Pistons": [0.24, 0.24, 0.24, 0.28],
-    "Wizards": [0.26, 0.25, 0.23, 0.26], "Trail Blazers": [0.24, 0.24, 0.25, 0.27]
-}
-
 STARS_DB = {
     "tatum": [22.5, 18.5, 29.5], "jokic": [31.5, 25.0, 32.1], "doncic": [28.1, 23.5, 35.8], 
     "james": [23.0, 19.0, 28.5], "curry": [24.5, 20.0, 30.2], "embiid": [30.2, 24.5, 34.0], 
@@ -88,7 +69,7 @@ STARS_DB = {
     "wembanayama": [22.0, 18.0, 28.5], "haliburton": [20.0, 17.0, 25.0]
 }
 
-# --- 3. FUNCIONES INTELIGENTES ---
+# --- 3. FUNCIONES INTELIGENTES (SCRAPING Y CÁLCULO) ---
 
 def get_star_rating(player_name):
     name_lower = player_name.lower()
@@ -113,22 +94,18 @@ def get_espn_injuries():
 def calculate_injury_penalty(team_nick, injuries_db):
     bajas = injuries_db.get(team_nick, [])
     penalty = 0.0
+    detected_stars = []
     for player in bajas:
-        _, val = get_star_rating(player)
+        label, val = get_star_rating(player)
+        detected_stars.append(f"{label} {player}")
         if val == "elite": penalty += 0.12
         else: penalty += val
-    return min(0.30, penalty)
-
-def get_matchup_bonus(team_a, team_b):
-    if team_a not in TEAM_SKILLS or team_b not in TEAM_SKILLS: return 0.0
-    # Bonus si A tiene mejores triples que la defensa de B
-    bonus = (TEAM_SKILLS[team_a][0] - TEAM_SKILLS[team_b][1]) * 0.4
-    return max(0, bonus)
+    return min(0.30, penalty), detected_stars
 
 # --- 4. INTERFAZ Y SIDEBAR ---
 with st.sidebar:
     st.header("📝 GESTIÓN HISTÓRICA")
-    fecha_consulta = st.date_input("Consultar fecha:", datetime.now() - timedelta(days=2))
+    fecha_consulta = st.date_input("Consultar fecha:", datetime.now() - timedelta(days=1))
     
     conn = sqlite3.connect('nba_historial.db')
     df_pendientes = pd.read_sql_query(f"SELECT * FROM predicciones WHERE fecha = '{fecha_consulta.strftime('%Y-%m-%d')}'", conn)
@@ -148,10 +125,78 @@ with st.sidebar:
     st.divider()
     st.subheader("🦓 Arbitraje y Casino")
     ref_trend = st.selectbox("Tendencia Árbitros", ["Neutral", "Over (Pitan Mucho)", "Under (Dejan Jugar)"])
-    linea_ou = st.number_input("Línea O/U Casino", value=220.5)
+    linea_ou = st.number_input("Línea O/U Casino", value=220.50)
 
 # --- 5. CUERPO PRINCIPAL ---
-st.title("🏀 NBA AI PREDICTOR V10.1 FULL")
+st.title("🏀 NBA AI PREDICTOR V10.2")
 
 inj_db = get_espn_injuries()
-stats
+stats_db = ADVANCED_STATS_FALLBACK
+
+# Expandible de Lesionados (Reporte General)
+with st.expander("🚑 REPORTE DE LESIONADOS (ESPN)"):
+    if inj_db:
+        cols = st.columns(3)
+        for i, (team, players) in enumerate(inj_db.items()):
+            with cols[i % 3]:
+                st.write(f"**{team}**")
+                for p in players:
+                    st.caption(f"{get_star_rating(p)[0]} {p}")
+    else:
+        st.write("No se pudo cargar la data de ESPN en este momento.")
+
+st.divider()
+
+col1, col2 = st.columns(2)
+with col1:
+    l_nick = st.selectbox("LOCAL", sorted(stats_db.keys()), index=0)
+    penal_l, bajas_l = calculate_injury_penalty(l_nick, inj_db)
+    if bajas_l:
+        st.error(f"Impacto Bajas: -{round(penal_l*100, 1)}%")
+        for b in bajas_l: st.caption(b)
+
+with col2:
+    v_nick = st.selectbox("VISITANTE", sorted(stats_db.keys()), index=1)
+    penal_v, bajas_v = calculate_injury_penalty(v_nick, inj_db)
+    if bajas_v:
+        st.error(f"Impacto Bajas: -{round(penal_v*100, 1)}%")
+        for b in bajas_v: st.caption(b)
+
+if st.button("🚀 ANALIZAR PARTIDO", type="primary"):
+    # Parámetros de cálculo
+    ref_f = 1.035 if "Over" in ref_trend else (0.965 if "Under" in ref_trend else 1.0)
+    
+    # Proyección con penalizaciones aplicadas
+    proj_l = (stats_db[l_nick][0] * (1 - penal_l) + 2.5) * ref_f
+    proj_v = (stats_db[v_nick][0] * (1 - penal_v)) * ref_f
+    total_ia = round(proj_l + proj_v, 1)
+
+    # Mostrar Resultados
+    st.header(f"Proyección: {l_nick} {int(proj_l)} - {int(proj_v)} {v_nick}")
+    
+    # PICKS AUTOMÁTICOS
+    st.markdown("---")
+    diff = total_ia - linea_ou
+    if abs(diff) > 8:
+        st.success(f"🔥 **VALOR ALTO:** Apostar al {'OVER' if diff > 0 else 'UNDER'} ({total_ia} vs {linea_ou})")
+    elif abs(diff) > 4:
+        st.info(f"✅ **VALOR MODERADO:** Sugerido {'Over' if diff > 0 else 'Under'}")
+    else:
+        st.warning("⚖️ **LÍNEA AJUSTADA:** Poco valor hoy.")
+
+    # Guardar en DB para el Historial
+    conn = sqlite3.connect('nba_historial.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO predicciones (fecha, equipo_l, equipo_v, pred_total, casino_total) VALUES (?,?,?,?,?)",
+              (datetime.now().strftime("%Y-%m-%d"), l_nick, v_nick, total_ia, linea_ou))
+    conn.commit()
+    conn.close()
+
+    # Mapa de Matchup
+    st.subheader("🔥 Análisis de Matchup")
+    chart_data = pd.DataFrame({l_nick: TEAM_SKILLS.get(l_nick, [5,5,5,5]), 
+                              v_nick: TEAM_SKILLS.get(v_nick, [5,5,5,5])}, 
+                              index=["Triples", "Pintura", "Rebote", "Ritmo"])
+    st.bar_chart(chart_data)
+
+st.caption("Los datos se extraen dinámicamente. Verifica siempre las alineaciones finales.")
